@@ -93,6 +93,22 @@ async def scrape_reddit(url: str, vid_name_and_path: str):
     reddit.url = url
     resp = None
     try:
+        # yt-dlp first
+        ydl_opts = {
+            "outtmpl": vid_name_and_path,
+            "quiet": True,
+            "no_warnings": True,
+            "format": "bestvideo+bestaudio/best",
+            "merge_output_format": "mp4",
+        }
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            resp = ydl.download([url])
+            print("yt-dlp download response:", resp)
+        if resp == 0:
+            return True, vid_name_and_path
+    except Exception as e:
+        print("Failed to download with yt-dlp:", e, "trying redvid...")
+    try:
         resp = reddit.download()
     except BaseException as e:  # reddit package uses the BaseException class
         print(e)
