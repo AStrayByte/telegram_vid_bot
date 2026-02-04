@@ -9,7 +9,7 @@ from playwright.async_api import Playwright, async_playwright
 from RedDownloader import RedDownloader
 from redvid import Downloader
 from rich import print
-
+import yt_dlp
 from utils import (
     best_vid_and_audio_steam,
     download_mp4_from_vid_and_audio,
@@ -121,6 +121,23 @@ async def scrape_reddit(url: str, vid_name_and_path: str):
 
 async def scrape_twitter(url: str, vid_name: str):
     try:
+        ydl_opts = {
+            "outtmpl": vid_name,
+            "cookiefile": "storage_states/twittercookies.txt",
+            "quiet": True,
+            "no_warnings": True,
+            "format": "bestvideo+bestaudio/best",
+            "merge_output_format": "mp4",
+            # if there are multiple videos, download all of them. this isnt working currently
+            "noplaylist": False,
+        }
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            resp = ydl.download([url])
+            print("yt-dlp download response:", resp)
+        return [vid_name]
+    except Exception as e:
+        print("Failed to download with yt-dlp:", e, "trying playwright...")
+    try:
         async with async_playwright() as playwright:
             # Connect to Browser and load context
             browser, page = await setup_browser(playwright, "twitter.json")
@@ -193,6 +210,40 @@ def insta_urls_to_vid(urls: List[str], vid_name: str):
 
 
 async def scrape_instagram(url: str, vid_name: str):
+    try:
+        # use yt-dlp first
+        ydl_opts = {
+            "outtmpl": vid_name,
+            "cookiefile": "storage_states/instagramcookies.txt",
+            "quiet": True,
+            "no_warnings": True,
+            "format": "bestvideo+bestaudio/best",
+            "merge_output_format": "mp4",
+            "postprocessors": [{"key": "FFmpegVideoConvertor", "preferedformat": "mp4"}],
+            "postprocessor_args": [
+                "-c:v",
+                "libx264",
+                "-preset",
+                "veryfast",
+                "-crf",
+                "26",
+                "-pix_fmt",
+                "yuv420p",
+                "-c:a",
+                "aac",
+                "-b:a",
+                "96k",
+                "-movflags",
+                "+faststart",
+            ],
+        }
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            resp = ydl.download([url])
+            print("yt-dlp download response:", resp)
+            if resp == 0:
+                return True
+    except Exception as e:
+        print("Failed to download with yt-dlp:", e, "trying playwright...")
     try:
         async with async_playwright() as playwright:
             # Connect to Browser and load context

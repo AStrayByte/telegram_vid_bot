@@ -43,7 +43,7 @@ def get_vid_dimensions(vid_name: str):
     resp = None
     try:
         resp = subprocess.run(
-            f"ffprobe -v error -select_streams v -show_entries stream=width,height -of csv=p=0:s=x  {vid_name}",
+            f"ffprobe -v error -select_streams v:0 -show_entries stream=width,height -of default=noprint_wrappers=1:nokey=1 {vid_name}  | paste -sdx -",
             shell=True,
             check=True,
             capture_output=True,

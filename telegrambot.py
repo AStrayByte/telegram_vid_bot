@@ -45,8 +45,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 def check_for_downloaded_vid(vid_name: str):
-    """Checks for up to 10 seconds if the video exists"""
-    for i in range(10):
+    """Checks for up to 20 seconds if the video exists"""
+    for i in range(20):
         try:
             with open(vid_name, "rb"):
                 return True
