@@ -16,6 +16,8 @@ def url_to_filename(url: str):
         vid_name = f"{vid_id}.mp4"
     elif url.startswith("https://instagram.com/") or url.startswith("https://www.instagram.com/"):
         url = url.split("?")[0]
+        if url.endswith("/"):
+            url = url[:-1]
         vid_id = url.split("/")[-1]
         vid_name = f"{vid_id}.mp4"
     elif url.startswith("https://www.reddit.com"):

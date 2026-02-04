@@ -125,6 +125,23 @@ async def handle_reddit_url(
         )
         return
     width, height = get_vid_dimensions(vid_name)
+    # resize if too large
+    size = get_file_size_in_mb(vid_name)
+    if not size:
+        await context.bot.send_message(
+            chat_id=update.effective_chat.id,
+            text="Failed to get video size attempting upload anyways!",
+            reply_to_message_id=message_id,
+        )
+    else:
+        if size > 50:
+            await context.bot.send_message(
+                chat_id=update.effective_chat.id,
+                text=f"Video is too large! {size} > 50MB. Reducing to 50MB!",
+                reply_to_message_id=message_id,
+            )
+            vid_name = reduce_video_size(vid_name)
+            width, height = get_vid_dimensions(vid_name)
     await context.bot.send_video(
         chat_id=update.effective_chat.id,
         video=open(vid_name, "rb"),
@@ -183,7 +200,7 @@ async def handle_twitter_url(
                     reply_to_message_id=message_id,
                 )
                 vid = reduce_video_size(vid)
-
+                width, height = get_vid_dimensions(vid)
         try:
             await context.bot.send_video(
                 chat_id=update.effective_chat.id,
