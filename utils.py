@@ -3,6 +3,41 @@ from rich import print
 import subprocess
 import os
 from typing import List, Optional, Tuple
+from urllib.parse import urlparse, parse_qs, urlencode, urlunparse
+
+
+# Query params to always strip from any URL
+TRACKING_PARAMS = {
+    "utm_source", "utm_medium", "utm_campaign", "utm_term", "utm_content",
+    "fbclid", "gclid", "gclsrc", "dclid", "gbraid", "wbraid",
+    "mc_cid", "mc_eid", "msclkid", "twclid",
+    "igshid", "ig_rid",
+    "ref", "ref_src", "ref_url", "referer",
+    "feature", "src", "s", "share_id",
+}
+
+# YouTube: only these params matter for playback
+YOUTUBE_KEEP_PARAMS = {"v", "t", "list", "index"}
+
+
+def clean_url(url: str) -> str:
+    """Strip tracking/analytics parameters from URLs to improve privacy."""
+    parsed = urlparse(url)
+    params = parse_qs(parsed.query, keep_blank_values=True)
+
+    # YouTube - keep only essential params
+    if parsed.hostname in ("www.youtube.com", "youtube.com", "m.youtube.com"):
+        cleaned = {k: v for k, v in params.items() if k in YOUTUBE_KEEP_PARAMS}
+    elif parsed.hostname in ("youtu.be",):
+        # Short URLs like youtu.be/VIDEO_ID?si=tracking - strip everything
+        cleaned = {k: v for k, v in params.items() if k in ("t",)}
+    else:
+        # Everything else - strip known tracking params
+        cleaned = {k: v for k, v in params.items() if k.lower() not in TRACKING_PARAMS}
+
+    # Rebuild the query string (flatten single-value lists)
+    query = urlencode({k: v[0] if len(v) == 1 else v for k, v in cleaned.items()}, doseq=True)
+    return urlunparse(parsed._replace(query=query))
 
 
 def url_to_filename(url: str):
@@ -25,8 +60,11 @@ def url_to_filename(url: str):
         vid_id = [_ for _ in url.split("/") if _][-1]
         vid_name = f"{vid_id}.mp4"
     else:
-        print(f"This is not a known link! {url}")
-        vid_name = "ERROR.mp4"
+        # Generic fallback - hash the URL for a unique filename
+        import hashlib
+        url_clean = url.split("?")[0]
+        vid_id = hashlib.md5(url_clean.encode()).hexdigest()[:12]
+        vid_name = f"{vid_id}.mp4"
     return f"videos/{vid_name}"
 
 

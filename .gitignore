@@ -1,5 +1,6 @@
 #My Custom Ignores
 storage_states/*.json
+storage_states/*
 videos/*.mp4
 videos/redvid_temp
 secret.py

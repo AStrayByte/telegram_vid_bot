@@ -225,6 +225,26 @@ def insta_urls_to_vid(urls: List[str], vid_name: str):
     return vid_name
 
 
+async def scrape_generic(url: str, vid_name: str):
+    """Generic yt-dlp downloader for any supported site (TikTok, YouTube, etc.)"""
+    try:
+        ydl_opts = {
+            "outtmpl": vid_name,
+            "quiet": True,
+            "no_warnings": True,
+            "format": "bestvideo+bestaudio/best",
+            "merge_output_format": "mp4",
+        }
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            resp = ydl.download([url])
+            print("yt-dlp download response:", resp)
+        if resp == 0:
+            return True
+    except Exception as e:
+        print("Failed to download with yt-dlp:", e)
+    return False
+
+
 async def scrape_instagram(url: str, vid_name: str):
     try:
         # use yt-dlp first

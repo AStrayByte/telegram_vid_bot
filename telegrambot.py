@@ -13,13 +13,14 @@ from telegram.ext import (
 )
 
 from utils import (
+    clean_url,
     convert_gif_to_mp4,
     get_file_size_in_mb,
     get_vid_dimensions,
     reduce_video_size,
     url_to_filename,
 )
-from web_scrape_bot import scrape_instagram, scrape_reddit, scrape_twitter
+from web_scrape_bot import scrape_generic, scrape_instagram, scrape_reddit, scrape_twitter
 
 TOKEN = "SECRET"
 
@@ -219,23 +220,67 @@ async def handle_twitter_url(
         return
 
 
+async def handle_generic_url(
+    url: str, update: Update, context: ContextTypes.DEFAULT_TYPE, message_id: int = None
+):
+    print("Trying generic yt-dlp download!")
+    await context.bot.send_message(
+        chat_id=update.effective_chat.id,
+        text=f"Trying to download video from {url}",
+        reply_to_message_id=message_id,
+    )
+    vid_name = url_to_filename(url)
+    success = await scrape_generic(url, vid_name)
+    if not success:
+        await context.bot.send_message(
+            chat_id=update.effective_chat.id,
+            text="Failed to download video! Site may not be supported.",
+            reply_to_message_id=message_id,
+        )
+        return
+    found = check_for_downloaded_vid(vid_name)
+    if not found:
+        await context.bot.send_message(
+            chat_id=update.effective_chat.id,
+            text="Failed to find video!",
+            reply_to_message_id=message_id,
+        )
+        return
+    width, height = get_vid_dimensions(vid_name)
+    size = get_file_size_in_mb(vid_name)
+    if size and size > 50:
+        await context.bot.send_message(
+            chat_id=update.effective_chat.id,
+            text=f"Video is too large! {size:.1f} > 50MB. Reducing to 50MB!",
+            reply_to_message_id=message_id,
+        )
+        vid_name = reduce_video_size(vid_name)
+        width, height = get_vid_dimensions(vid_name)
+    await context.bot.send_video(
+        chat_id=update.effective_chat.id,
+        video=open(vid_name, "rb"),
+        width=width,
+        height=height,
+        reply_to_message_id=message_id,
+    )
+
+
 async def handle_text_input(text: str, update: Update, context: ContextTypes.DEFAULT_TYPE):
     message_id = update.message.message_id
-    if text.startswith("https://x.com/"):
-        await handle_twitter_url(text, update, context, message_id)
-    elif text.startswith("https://twitter.com/"):
+    text = clean_url(text)
+    if text.startswith("https://x.com/") or text.startswith("https://twitter.com/"):
         await handle_twitter_url(text, update, context, message_id)
     elif text.startswith("https://www.reddit.com"):
-        # elif text.startswith("https://v.redd.it/"):
         await handle_reddit_url(text, update, context, message_id)
     elif "instagram.com/" in text:
         await handle_instagram_url(text, update, context, message_id)
-
+    elif text.startswith("http://") or text.startswith("https://") or text.startswith("www."):
+        await handle_generic_url(text, update, context, message_id)
     else:
-        print(f"This is not a twitter link! {text}")
+        print(f"Not a URL: {text}")
         await context.bot.send_message(
             chat_id=update.effective_chat.id,
-            text=f"Unknown link {text}",
+            text=f"Not a valid URL: {text}",
             reply_to_message_id=update.message.message_id,
         )
 
