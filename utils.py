@@ -155,6 +155,55 @@ def convert_gif_to_mp4(gif_path: str, mp4_path: str):
     return mp4_path
 
 
+def get_video_codec(vid_name: str) -> Optional[str]:
+    """Return the video stream codec name (e.g. 'h264', 'av1', 'hevc') or None."""
+    try:
+        resp = subprocess.run(
+            [
+                "ffprobe",
+                "-v",
+                "error",
+                "-select_streams",
+                "v:0",
+                "-show_entries",
+                "stream=codec_name",
+                "-of",
+                "default=noprint_wrappers=1:nokey=1",
+                vid_name,
+            ],
+            check=True,
+            capture_output=True,
+        )
+    except subprocess.CalledProcessError:
+        return None
+    return resp.stdout.decode().strip() or None
+
+
+def ensure_h264(vid_name: str) -> str:
+    """Telegram's in-app player only handles H.264. Transcode if the file is AV1/HEVC/etc."""
+    codec = get_video_codec(vid_name)
+    if codec == "h264":
+        return vid_name
+    print(f"Video codec is {codec!r}, transcoding to h264 for Telegram compatibility...")
+    transcoded = vid_name.replace(".mp4", "_h264.mp4")
+    result = subprocess.run(
+        [
+            "ffmpeg", "-y", "-i", vid_name,
+            "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
+            "-pix_fmt", "yuv420p",
+            "-c:a", "aac", "-b:a", "128k",
+            "-movflags", "+faststart",
+            transcoded,
+        ],
+        capture_output=True,
+    )
+    if result.returncode != 0:
+        print("Transcode failed:", result.stderr.decode()[-500:])
+        return vid_name
+    os.replace(transcoded, vid_name)
+    return vid_name
+
+
 def get_media_type(url):
     # Download a portion of the file and analyze it with ffprobe
     result = subprocess.run(

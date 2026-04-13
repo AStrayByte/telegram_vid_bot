@@ -13,6 +13,7 @@ import yt_dlp
 from utils import (
     best_vid_and_audio_steam,
     download_mp4_from_vid_and_audio,
+    ensure_h264,
     filename_enumerated,
 )
 
@@ -232,13 +233,21 @@ async def scrape_generic(url: str, vid_name: str):
             "outtmpl": vid_name,
             "quiet": True,
             "no_warnings": True,
-            "format": "bestvideo+bestaudio/best",
+            # Prefer H.264 (avc1) so Telegram's in-app player can render it.
+            # Facebook/others sometimes only serve AV1, which Telegram can't decode.
+            "format": (
+                "bestvideo[vcodec^=avc1]+bestaudio[acodec^=mp4a]/"
+                "bestvideo[vcodec^=avc1]+bestaudio/"
+                "best[vcodec^=avc1]/"
+                "bestvideo+bestaudio/best"
+            ),
             "merge_output_format": "mp4",
         }
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             resp = ydl.download([url])
             print("yt-dlp download response:", resp)
         if resp == 0:
+            ensure_h264(vid_name)
             return True
     except Exception as e:
         print("Failed to download with yt-dlp:", e)
