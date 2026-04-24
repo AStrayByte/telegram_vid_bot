@@ -1,9 +1,11 @@
-import requests
-from rich import print
-import subprocess
+import hashlib
 import os
+import subprocess
 from typing import List, Optional, Tuple
 from urllib.parse import urlparse, parse_qs, urlencode, urlunparse
+
+import requests
+from rich import print
 
 
 # Query params to always strip from any URL
@@ -41,32 +43,11 @@ def clean_url(url: str) -> str:
 
 
 def url_to_filename(url: str):
-    if url.startswith("https://x.com/") or url.startswith("https://twitter.com/"):
-        url = url.split("?")[0]
-        vid_id = url.split("/")[-1]
-        vid_name = f"{vid_id}.mp4"
-    elif url.startswith("https://www.instagram.com/reel/"):
-        url = url.split("?")[0]
-        vid_id = url.split("/")[-2]
-        vid_name = f"{vid_id}.mp4"
-    elif url.startswith("https://instagram.com/") or url.startswith("https://www.instagram.com/"):
-        url = url.split("?")[0]
-        if url.endswith("/"):
-            url = url[:-1]
-        vid_id = url.split("/")[-1]
-        vid_name = f"{vid_id}.mp4"
-    elif url.startswith("https://www.reddit.com"):
-        url = url.split("?")[0]
-        vid_id = [_ for _ in url.split("/") if _][-1]
-        vid_name = f"{vid_id}.mp4"
-    else:
-        # Generic fallback - hash the URL for a unique filename.
-        # Hash the full URL (clean_url already stripped tracking params) so we
-        # don't collapse sites like YouTube where the video ID lives in ?v=...
-        import hashlib
-        vid_id = hashlib.md5(url.encode()).hexdigest()[:12]
-        vid_name = f"{vid_id}.mp4"
-    return f"videos/{vid_name}"
+    # Hash the full (already de-tracked) URL so every distinct link gets its own
+    # file. Per-site parsing kept collapsing different videos to the same name
+    # (YouTube ?v=, tweet /photo/1 suffixes, trailing slashes, etc.).
+    vid_id = hashlib.md5(url.encode()).hexdigest()[:12]
+    return f"videos/{vid_id}.mp4"
 
 
 def filename_enumerated(vid_name: str, i: int):
