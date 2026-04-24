@@ -60,10 +60,11 @@ def url_to_filename(url: str):
         vid_id = [_ for _ in url.split("/") if _][-1]
         vid_name = f"{vid_id}.mp4"
     else:
-        # Generic fallback - hash the URL for a unique filename
+        # Generic fallback - hash the URL for a unique filename.
+        # Hash the full URL (clean_url already stripped tracking params) so we
+        # don't collapse sites like YouTube where the video ID lives in ?v=...
         import hashlib
-        url_clean = url.split("?")[0]
-        vid_id = hashlib.md5(url_clean.encode()).hexdigest()[:12]
+        vid_id = hashlib.md5(url.encode()).hexdigest()[:12]
         vid_name = f"{vid_id}.mp4"
     return f"videos/{vid_name}"
 
