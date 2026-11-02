@@ -1,3 +1,4 @@
+import glob
 import hashlib
 import os
 import subprocess
@@ -20,6 +21,27 @@ TRACKING_PARAMS = {
 
 # YouTube: only these params matter for playback
 YOUTUBE_KEEP_PARAMS = {"v", "t", "list", "index"}
+
+
+# Reserve room for MP4 container overhead and two-pass rate-control error.
+SIZE_SAFETY_MARGIN = 0.95
+
+AUDIO_BUDGET_SHARE = 0.2
+MIN_AUDIO_KBPS = 32
+MAX_AUDIO_KBPS = 128
+MIN_VIDEO_KBPS = 50
+
+# (short side in px, minimum video kbps worth encoding at that size), largest first.
+RESOLUTION_LADDER = ((1080, 1500), (720, 800), (480, 400), (360, 200), (240, 0))
+
+TELEGRAM_UPLOAD_LIMIT_MB = 50
+# Shrink only if the result can stay at 720p or better; split anything longer.
+MIN_SHRINK_VIDEO_KBPS = 800
+MAX_PART_SIZE_MB = 47
+MAX_PARTS = 10
+# Aim below the part limit, since bitrate varies across a video.
+SPLIT_HEADROOM = 0.9
+MAX_SPLIT_ATTEMPTS = 5
 
 
 def clean_url(url: str) -> str:
@@ -97,18 +119,29 @@ def get_file_size_in_mb(file_path):
     return os.path.getsize(file_path) / (1024 * 1024)
 
 
-def calculate_target_bitrate(vid_name: str, max_size_mb: int) -> int:
-    """bitrate in kbps (killabits per second) for a video to be reduced to a certain size
+def calculate_target_bitrate(vid_name: str, max_size_mb: int) -> float:
+    """Total (video + audio) kbps that fits a video into max_size_mb.
 
-    Bitrate (in kbps) = 1000*(Target size (in MB)×8/Duration (in seconds))"""
+    Bitrate (in kbps) = 1000*(Target size (in MB)×8/Duration (in seconds)), less a
+    margin for container overhead and encoder rate-control error."""
     vid_length = get_vid_length(vid_name)
     if not vid_length:
         return 0
-    target_bitrate = ((max_size_mb * 8) * 1000) / vid_length
-    if not target_bitrate:
-        print("ERROR: Target bitrate is 0!")
-        return 0
-    return target_bitrate
+    return ((max_size_mb * 8) * 1000) / vid_length * SIZE_SAFETY_MARGIN
+
+
+def _split_bitrate_budget(total_kbps: float) -> Tuple[int, int]:
+    """Divide a total bitrate into (video_kbps, audio_kbps)."""
+    audio_kbps = int(min(MAX_AUDIO_KBPS, max(MIN_AUDIO_KBPS, total_kbps * AUDIO_BUDGET_SHARE)))
+    return int(total_kbps - audio_kbps), audio_kbps
+
+
+def _short_side_for_bitrate(video_kbps: float) -> int:
+    """Largest short side (px) the video bitrate can encode without turning to mush."""
+    for short_side, min_kbps in RESOLUTION_LADDER:
+        if video_kbps >= min_kbps:
+            return short_side
+    return RESOLUTION_LADDER[-1][0]
 
 
 def reduce_video_size(vid_name: str, *, max_size_mb: int = 50):
@@ -118,13 +151,104 @@ def reduce_video_size(vid_name: str, *, max_size_mb: int = 50):
         return vid_name
     if get_file_size_in_mb(vid_name) < max_size_mb:
         return vid_name
-    vid_name_reduced = vid_name.replace(".mp4", "_reduced.mp4")
-    target_bitrate = calculate_target_bitrate(vid_name, max_size_mb)
-    subprocess.run(
-        f"ffmpeg -y -i {vid_name} -b:v {target_bitrate}k -b:a 128k -maxrate {target_bitrate}k -bufsize {target_bitrate * 2}k {vid_name_reduced}",
-        shell=True,
+
+    video_kbps, audio_kbps = _split_bitrate_budget(
+        calculate_target_bitrate(vid_name, max_size_mb)
     )
+    if video_kbps < MIN_VIDEO_KBPS:
+        print(f"ERROR: can't fit {vid_name} in {max_size_mb}MB, not reducing!")
+        return vid_name
+
+    vid_name_reduced = vid_name.replace(".mp4", "_reduced.mp4")
+    passlog = f"{vid_name}.2pass"
+    side = _short_side_for_bitrate(video_kbps)
+    # Scales the short side so portrait videos work too; min() prevents upscaling.
+    scale = f"scale='if(gt(iw,ih),-2,min(iw,{side}))':'if(gt(iw,ih),min(ih,{side}),-2)'"
+    encode = [
+        "ffmpeg", "-y", "-i", vid_name,
+        "-vf", scale,
+        "-c:v", "libx264", "-b:v", f"{video_kbps}k",
+        "-pix_fmt", "yuv420p",
+        "-passlogfile", passlog,
+    ]
+    first_pass = [*encode, "-pass", "1", "-an", "-f", "null", os.devnull]
+    second_pass = [
+        *encode, "-pass", "2",
+        "-c:a", "aac", "-b:a", f"{audio_kbps}k",
+        "-movflags", "+faststart",
+        vid_name_reduced,
+    ]
+    try:
+        subprocess.run(first_pass, check=True)
+        subprocess.run(second_pass, check=True)
+    except subprocess.CalledProcessError as e:
+        print(f"ERROR: failed to reduce {vid_name}: {e}")
+        return vid_name
+    finally:
+        for log_file in glob.glob(f"{glob.escape(passlog)}*"):
+            os.remove(log_file)
     return vid_name_reduced
+
+
+def split_video(vid_name: str, *, max_part_mb: int = MAX_PART_SIZE_MB) -> List[str]:
+    """Split a video on keyframes without re-encoding, into parts under max_part_mb.
+
+    Parts are contiguous, but bitrate varies, so if any part comes out too big the
+    split is redone with shorter segments. Returns [vid_name] if ffmpeg fails."""
+    stem = vid_name.replace(".mp4", "")
+    part_glob = f"{glob.escape(stem)}_part*.mp4"
+    segment_seconds = (
+        get_vid_length(vid_name) * max_part_mb * SPLIT_HEADROOM / get_file_size_in_mb(vid_name)
+    )
+    parts = [vid_name]
+    for _ in range(MAX_SPLIT_ATTEMPTS):
+        for old_part in glob.glob(part_glob):
+            os.remove(old_part)
+        try:
+            subprocess.run(
+                [
+                    "ffmpeg", "-y", "-i", vid_name,
+                    "-map", "0:v:0", "-map", "0:a?",
+                    "-c", "copy",
+                    "-f", "segment",
+                    "-segment_time", str(segment_seconds),
+                    "-reset_timestamps", "1",
+                    "-segment_format_options", "movflags=+faststart",
+                    f"{stem}_part%03d.mp4",
+                ],
+                check=True,
+            )
+        except subprocess.CalledProcessError as e:
+            print(f"ERROR: failed to split {vid_name}: {e}")
+            return [vid_name]
+        parts = sorted(glob.glob(part_glob))
+        largest_mb = max(get_file_size_in_mb(part) for part in parts)
+        if largest_mb <= max_part_mb:
+            return parts
+        segment_seconds *= max_part_mb / largest_mb * SPLIT_HEADROOM
+    print(f"ERROR: {vid_name} still has parts over {max_part_mb}MB after splitting!")
+    return parts
+
+
+def prepare_for_upload(vid_name: str) -> List[str]:
+    """Return the file(s) to send so each fits Telegram's upload limit, in order.
+
+    Shrinks a video if it can keep decent quality, otherwise splits it into parts. A
+    video that would need more than MAX_PARTS parts is shrunk first, then split."""
+    size_mb = get_file_size_in_mb(vid_name)
+    if size_mb <= TELEGRAM_UPLOAD_LIMIT_MB:
+        return [vid_name]
+    total_kbps = calculate_target_bitrate(vid_name, TELEGRAM_UPLOAD_LIMIT_MB)
+    if not total_kbps:
+        return [vid_name]
+    video_kbps, _ = _split_bitrate_budget(total_kbps)
+    if video_kbps >= MIN_SHRINK_VIDEO_KBPS:
+        return [reduce_video_size(vid_name)]
+    # Splitting aims below the part limit, so that's what MAX_PARTS parts can really hold.
+    max_split_size_mb = int(MAX_PARTS * MAX_PART_SIZE_MB * SPLIT_HEADROOM)
+    if size_mb > max_split_size_mb:
+        vid_name = reduce_video_size(vid_name, max_size_mb=max_split_size_mb)
+    return split_video(vid_name)
 
 
 def convert_gif_to_mp4(gif_path: str, mp4_path: str):

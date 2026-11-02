@@ -242,6 +242,21 @@ async def scrape_generic(url: str, vid_name: str):
                 "bestvideo+bestaudio/best"
             ),
             "merge_output_format": "mp4",
+            # YouTube now requires a PO token (solved via the bgutil-ytdlp-pot-provider
+            # plugin + a local `deno` JS runtime, see README) to serve adaptive
+            # formats above 360p on most clients. "mweb" is the client that gives
+            # full resolution (up to 4K) once PO tokens are available. If deno/the
+            # PO token provider isn't set up, PO-token-gated clients return no
+            # formats at all, so fall back to "android", which YouTube still serves
+            # a (low quality, 360p) muxed stream for without needing a PO token.
+            # ("web" is included as a last resort; it also needs a PO token.)
+            # Also avoid the default client-selection order: without a JS runtime,
+            # it falls back to "android_vr", which wrongly reports some otherwise-
+            # normal videos (e.g. certain "made for kids" uploads) as UNPLAYABLE.
+            "extractor_args": {"youtube": {"player_client": ["mweb", "android", "web"]}},
+            # Allow yt-dlp to fetch its remote JS-challenge-solver component
+            # (used together with deno to solve nsig/PO token challenges).
+            "remote_components": ["ejs:github"],
         }
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             resp = ydl.download([url])

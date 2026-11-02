@@ -13,14 +13,18 @@ from telegram.ext import (
 )
 
 from utils import (
+    TELEGRAM_UPLOAD_LIMIT_MB,
     clean_url,
     convert_gif_to_mp4,
     get_file_size_in_mb,
     get_vid_dimensions,
-    reduce_video_size,
+    prepare_for_upload,
     url_to_filename,
 )
 from web_scrape_bot import scrape_generic, scrape_instagram, scrape_reddit, scrape_twitter
+
+# python-telegram-bot's 20s default is too short for uploads near the size limit.
+UPLOAD_WRITE_TIMEOUT_SECONDS = 300
 
 TOKEN = "SECRET"
 
@@ -56,6 +60,43 @@ def check_for_downloaded_vid(vid_name: str):
     return False
 
 
+async def send_video_parts(
+    vid_name: str, update: Update, context: ContextTypes.DEFAULT_TYPE, message_id: int = None
+):
+    """Send a video, shrinking or splitting it first if it's over the upload limit."""
+    chat_id = update.effective_chat.id
+    size = get_file_size_in_mb(vid_name)
+    if size > TELEGRAM_UPLOAD_LIMIT_MB:
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text=f"Video is too large! {size:.1f} > {TELEGRAM_UPLOAD_LIMIT_MB}MB. "
+            "Shrinking or splitting it!",
+            reply_to_message_id=message_id,
+        )
+    parts = prepare_for_upload(vid_name)
+    for number, part in enumerate(parts, start=1):
+        width, height = get_vid_dimensions(part)
+        try:
+            with open(part, "rb") as video:
+                await context.bot.send_video(
+                    chat_id=chat_id,
+                    video=video,
+                    width=width,
+                    height=height,
+                    caption=f"Part {number}/{len(parts)}" if len(parts) > 1 else None,
+                    reply_to_message_id=message_id,
+                    write_timeout=UPLOAD_WRITE_TIMEOUT_SECONDS,
+                )
+        except Exception as e:
+            print(e)
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text=f"Failed to send video! {e}",
+                reply_to_message_id=message_id,
+            )
+            return
+
+
 async def handle_instagram_url(
     url: str, update: Update, context: ContextTypes.DEFAULT_TYPE, message_id: int = None
 ):
@@ -75,10 +116,7 @@ async def handle_instagram_url(
             chat_id=update.effective_chat.id, text=f"Failed to find video!"
         )
         return
-    width, height = get_vid_dimensions(vid_name)
-    await context.bot.send_video(
-        chat_id=update.effective_chat.id, video=open(vid_name, "rb"), width=width, height=height
-    )
+    await send_video_parts(vid_name, update, context, message_id)
 
 
 def unshorten_url(short_url):
@@ -125,31 +163,7 @@ async def handle_reddit_url(
             reply_to_message_id=message_id,
         )
         return
-    width, height = get_vid_dimensions(vid_name)
-    # resize if too large
-    size = get_file_size_in_mb(vid_name)
-    if not size:
-        await context.bot.send_message(
-            chat_id=update.effective_chat.id,
-            text="Failed to get video size attempting upload anyways!",
-            reply_to_message_id=message_id,
-        )
-    else:
-        if size > 50:
-            await context.bot.send_message(
-                chat_id=update.effective_chat.id,
-                text=f"Video is too large! {size} > 50MB. Reducing to 50MB!",
-                reply_to_message_id=message_id,
-            )
-            vid_name = reduce_video_size(vid_name)
-            width, height = get_vid_dimensions(vid_name)
-    await context.bot.send_video(
-        chat_id=update.effective_chat.id,
-        video=open(vid_name, "rb"),
-        width=width,
-        height=height,
-        reply_to_message_id=message_id,
-    )
+    await send_video_parts(vid_name, update, context, message_id)
 
 
 async def handle_twitter_url(
@@ -185,38 +199,7 @@ async def handle_twitter_url(
                 reply_to_message_id=message_id,
             )
             return
-        width, height = get_vid_dimensions(vid)
-        size = get_file_size_in_mb(vid)
-        if not size:
-            await context.bot.send_message(
-                chat_id=update.effective_chat.id,
-                text="Failed to get video size attempting upload anyways!",
-                reply_to_message_id=message_id,
-            )
-        else:
-            if size > 50:
-                await context.bot.send_message(
-                    chat_id=update.effective_chat.id,
-                    text=f"Video is too large! {size} > 50MB. Reducing to 50MB!",
-                    reply_to_message_id=message_id,
-                )
-                vid = reduce_video_size(vid)
-                width, height = get_vid_dimensions(vid)
-        try:
-            await context.bot.send_video(
-                chat_id=update.effective_chat.id,
-                video=open(vid, "rb"),
-                width=width,
-                height=height,
-                reply_to_message_id=message_id,
-            )
-        except Exception as e:
-            print(e)
-            await context.bot.send_message(
-                chat_id=update.effective_chat.id,
-                text=f"Failed to send video! {e}",
-                reply_to_message_id=message_id,
-            )
+        await send_video_parts(vid, update, context, message_id)
         return
 
 
@@ -246,23 +229,7 @@ async def handle_generic_url(
             reply_to_message_id=message_id,
         )
         return
-    width, height = get_vid_dimensions(vid_name)
-    size = get_file_size_in_mb(vid_name)
-    if size and size > 50:
-        await context.bot.send_message(
-            chat_id=update.effective_chat.id,
-            text=f"Video is too large! {size:.1f} > 50MB. Reducing to 50MB!",
-            reply_to_message_id=message_id,
-        )
-        vid_name = reduce_video_size(vid_name)
-        width, height = get_vid_dimensions(vid_name)
-    await context.bot.send_video(
-        chat_id=update.effective_chat.id,
-        video=open(vid_name, "rb"),
-        width=width,
-        height=height,
-        reply_to_message_id=message_id,
-    )
+    await send_video_parts(vid_name, update, context, message_id)
 
 
 async def handle_text_input(text: str, update: Update, context: ContextTypes.DEFAULT_TYPE):
