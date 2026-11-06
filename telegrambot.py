@@ -226,17 +226,14 @@ async def handle_twitter_url(
         return
     print(vids)
     for vid in vids:
-        found = check_for_downloaded_vid(vid_name=vid)
-        # found = None
-        if not found:
+        if not check_for_downloaded_vid(vid_name=vid):
             await context.bot.send_message(
                 chat_id=update.effective_chat.id,
-                text="Failed to find video!",
+                text=f"Failed to find video {vid}!",
                 reply_to_message_id=message_id,
             )
-            return
+            continue
         await send_video_parts(url, vid, update, context, message_id)
-        return
 
 
 async def handle_generic_url(

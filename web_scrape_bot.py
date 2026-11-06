@@ -138,20 +138,32 @@ async def scrape_reddit(url: str, vid_name_and_path: str):
 
 async def scrape_twitter(url: str, vid_name: str):
     try:
+        stem = vid_name.replace(".mp4", "")
         ydl_opts = {
-            "outtmpl": vid_name,
+            # A tweet with several videos is a playlist, so number each file (stem_1.mp4,
+            # stem_2.mp4, ...) or they all share one name and only the first downloads.
+            # A single video has no playlist_index and keeps vid_name as is.
+            "outtmpl": f"{stem}%(playlist_index&_{{}}|)s.%(ext)s",
             "cookiefile": "storage_states/twittercookies.txt",
             "quiet": True,
             "no_warnings": True,
             "format": "bestvideo+bestaudio/best",
             "merge_output_format": "mp4",
-            # if there are multiple videos, download all of them. this isnt working currently
             "noplaylist": False,
         }
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            resp = ydl.download([url])
-            print("yt-dlp download response:", resp)
-        return [vid_name]
+            info = ydl.extract_info(url, download=True)
+        entries = info.get("entries") or [info]
+        vids = [
+            download["filepath"]
+            for entry in entries
+            if entry
+            for download in entry.get("requested_downloads", [])
+        ]
+        print("yt-dlp downloaded:", vids)
+        if vids:
+            return vids
+        print("yt-dlp found no videos, trying playwright...")
     except Exception as e:
         print("Failed to download with yt-dlp:", e, "trying playwright...")
     try:
