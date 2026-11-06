@@ -4,6 +4,7 @@ import time
 
 import requests
 from telegram import Update
+from telegram.error import TimedOut
 from telegram.ext import (
     ApplicationBuilder,
     CommandHandler,
@@ -19,12 +20,14 @@ from utils import (
     get_file_size_in_mb,
     get_vid_dimensions,
     prepare_for_upload,
+    upload_log,
     url_to_filename,
 )
 from web_scrape_bot import scrape_generic, scrape_instagram, scrape_reddit, scrape_twitter
 
-# python-telegram-bot's 20s default is too short for uploads near the size limit.
-UPLOAD_WRITE_TIMEOUT_SECONDS = 300
+# python-telegram-bot's defaults (20s to upload, 5s for the reply) are too short for videos
+# near the size limit: Telegram can spend longer than that processing one before replying.
+UPLOAD_TIMEOUT_SECONDS = 300
 
 TOKEN = "SECRET"
 
@@ -61,21 +64,37 @@ def check_for_downloaded_vid(vid_name: str):
 
 
 async def send_video_parts(
-    vid_name: str, update: Update, context: ContextTypes.DEFAULT_TYPE, message_id: int = None
+    url: str,
+    vid_name: str,
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    message_id: int = None,
 ):
     """Send a video, shrinking or splitting it first if it's over the upload limit."""
     chat_id = update.effective_chat.id
     size = get_file_size_in_mb(vid_name)
-    if size > TELEGRAM_UPLOAD_LIMIT_MB:
+    over_limit = size > TELEGRAM_UPLOAD_LIMIT_MB
+    if over_limit:
+        upload_log.info("Handling %s", url)
         await context.bot.send_message(
             chat_id=chat_id,
             text=f"Video is too large! {size:.1f} > {TELEGRAM_UPLOAD_LIMIT_MB}MB. "
             "Shrinking or splitting it!",
             reply_to_message_id=message_id,
         )
-    parts = prepare_for_upload(vid_name)
+    try:
+        parts = prepare_for_upload(vid_name)
+    except Exception as e:
+        upload_log.exception("Failed to prepare %s for %s", vid_name, url)
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text=f"Failed to prepare video! {e}",
+            reply_to_message_id=message_id,
+        )
+        return
     for number, part in enumerate(parts, start=1):
         width, height = get_vid_dimensions(part)
+        part_label = f"part {number}/{len(parts)}" if len(parts) > 1 else "the video"
         try:
             with open(part, "rb") as video:
                 await context.bot.send_video(
@@ -85,13 +104,30 @@ async def send_video_parts(
                     height=height,
                     caption=f"Part {number}/{len(parts)}" if len(parts) > 1 else None,
                     reply_to_message_id=message_id,
-                    write_timeout=UPLOAD_WRITE_TIMEOUT_SECONDS,
+                    write_timeout=UPLOAD_TIMEOUT_SECONDS,
+                    read_timeout=UPLOAD_TIMEOUT_SECONDS,
                 )
-        except Exception as e:
-            print(e)
+            if over_limit:
+                upload_log.info("Sent %s: %s", part_label, part)
+        except TimedOut:
+            # The video may well have arrived, so keep going rather than dropping later parts.
+            upload_log.warning(
+                "Timed out sending %s: %s (%.1fMiB) for %s",
+                part_label, part, get_file_size_in_mb(part), url,
+            )
             await context.bot.send_message(
                 chat_id=chat_id,
-                text=f"Failed to send video! {e}",
+                text=f"Timed out waiting for Telegram on {part_label}. It may still arrive.",
+                reply_to_message_id=message_id,
+            )
+        except Exception as e:
+            upload_log.error(
+                "Failed to send %s: %s (%.1fMiB) for %s: %r",
+                part_label, part, get_file_size_in_mb(part), url, e,
+            )
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text=f"Failed to send {part_label}! {e}",
                 reply_to_message_id=message_id,
             )
             return
@@ -116,7 +152,7 @@ async def handle_instagram_url(
             chat_id=update.effective_chat.id, text=f"Failed to find video!"
         )
         return
-    await send_video_parts(vid_name, update, context, message_id)
+    await send_video_parts(url, vid_name, update, context, message_id)
 
 
 def unshorten_url(short_url):
@@ -163,7 +199,7 @@ async def handle_reddit_url(
             reply_to_message_id=message_id,
         )
         return
-    await send_video_parts(vid_name, update, context, message_id)
+    await send_video_parts(url, vid_name, update, context, message_id)
 
 
 async def handle_twitter_url(
@@ -199,7 +235,7 @@ async def handle_twitter_url(
                 reply_to_message_id=message_id,
             )
             return
-        await send_video_parts(vid, update, context, message_id)
+        await send_video_parts(url, vid, update, context, message_id)
         return
 
 
@@ -229,7 +265,7 @@ async def handle_generic_url(
             reply_to_message_id=message_id,
         )
         return
-    await send_video_parts(vid_name, update, context, message_id)
+    await send_video_parts(url, vid_name, update, context, message_id)
 
 
 async def handle_text_input(text: str, update: Update, context: ContextTypes.DEFAULT_TYPE):

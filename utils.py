@@ -1,12 +1,26 @@
 import glob
 import hashlib
+import logging
 import os
 import subprocess
+from logging.handlers import RotatingFileHandler
 from typing import List, Optional, Tuple
 from urllib.parse import urlparse, parse_qs, urlencode, urlunparse
 
 import requests
 from rich import print
+
+# Lives beside the videos so it lands on the mounted volume when running in Docker.
+UPLOAD_LOG_PATH = "videos/upload.log"
+FFMPEG_ERROR_TAIL_CHARS = 2000
+
+upload_log = logging.getLogger("video_upload")
+upload_log.setLevel(logging.INFO)
+_upload_log_file = RotatingFileHandler(
+    UPLOAD_LOG_PATH, maxBytes=1_000_000, backupCount=2, delay=True
+)
+_upload_log_file.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
+upload_log.addHandler(_upload_log_file)
 
 
 # Query params to always strip from any URL
@@ -119,6 +133,34 @@ def get_file_size_in_mb(file_path):
     return os.path.getsize(file_path) / (1024 * 1024)
 
 
+def _describe_video(vid_name: str) -> str:
+    width, height = get_vid_dimensions(vid_name)
+    return (
+        f"{vid_name} ({get_file_size_in_mb(vid_name):.1f}MiB, {get_vid_length(vid_name)}s, "
+        f"{width}x{str(height).strip()}, {get_video_codec(vid_name)})"
+    )
+
+
+def _ffmpeg_version() -> str:
+    result = subprocess.run(["ffmpeg", "-version"], capture_output=True, text=True, errors="replace")
+    return result.stdout.split("\n")[0]
+
+
+def _run_ffmpeg(args: List[str]) -> None:
+    """Run ffmpeg, logging why if it fails. Raises CalledProcessError on failure."""
+    try:
+        subprocess.run(
+            ["ffmpeg", "-nostats", *args],
+            check=True,
+            capture_output=True,
+            text=True,
+            errors="replace",
+        )
+    except subprocess.CalledProcessError as e:
+        upload_log.error("%s\n%s", e, e.stderr[-FFMPEG_ERROR_TAIL_CHARS:])
+        raise
+
+
 def calculate_target_bitrate(vid_name: str, max_size_mb: int) -> float:
     """Total (video + audio) kbps that fits a video into max_size_mb.
 
@@ -156,7 +198,10 @@ def reduce_video_size(vid_name: str, *, max_size_mb: int = 50):
         calculate_target_bitrate(vid_name, max_size_mb)
     )
     if video_kbps < MIN_VIDEO_KBPS:
-        print(f"ERROR: can't fit {vid_name} in {max_size_mb}MB, not reducing!")
+        upload_log.error(
+            "Can't fit %s in %sMB (video budget %skbps), not reducing",
+            vid_name, max_size_mb, video_kbps,
+        )
         return vid_name
 
     vid_name_reduced = vid_name.replace(".mp4", "_reduced.mp4")
@@ -164,8 +209,12 @@ def reduce_video_size(vid_name: str, *, max_size_mb: int = 50):
     side = _short_side_for_bitrate(video_kbps)
     # Scales the short side so portrait videos work too; min() prevents upscaling.
     scale = f"scale='if(gt(iw,ih),-2,min(iw,{side}))':'if(gt(iw,ih),min(ih,{side}),-2)'"
+    upload_log.info(
+        "Shrinking to %sMB: short side %spx, video %skbps, audio %skbps",
+        max_size_mb, side, video_kbps, audio_kbps,
+    )
     encode = [
-        "ffmpeg", "-y", "-i", vid_name,
+        "-y", "-i", vid_name,
         "-vf", scale,
         "-c:v", "libx264", "-b:v", f"{video_kbps}k",
         "-pix_fmt", "yuv420p",
@@ -179,14 +228,15 @@ def reduce_video_size(vid_name: str, *, max_size_mb: int = 50):
         vid_name_reduced,
     ]
     try:
-        subprocess.run(first_pass, check=True)
-        subprocess.run(second_pass, check=True)
-    except subprocess.CalledProcessError as e:
-        print(f"ERROR: failed to reduce {vid_name}: {e}")
+        _run_ffmpeg(first_pass)
+        _run_ffmpeg(second_pass)
+    except subprocess.CalledProcessError:
+        upload_log.error("Failed to shrink %s, keeping the original", vid_name)
         return vid_name
     finally:
         for log_file in glob.glob(f"{glob.escape(passlog)}*"):
             os.remove(log_file)
+    upload_log.info("Shrunk to %s", _describe_video(vid_name_reduced))
     return vid_name_reduced
 
 
@@ -205,9 +255,9 @@ def split_video(vid_name: str, *, max_part_mb: int = MAX_PART_SIZE_MB) -> List[s
         for old_part in glob.glob(part_glob):
             os.remove(old_part)
         try:
-            subprocess.run(
+            _run_ffmpeg(
                 [
-                    "ffmpeg", "-y", "-i", vid_name,
+                    "-y", "-i", vid_name,
                     "-map", "0:v:0", "-map", "0:a?",
                     "-c", "copy",
                     "-f", "segment",
@@ -215,18 +265,22 @@ def split_video(vid_name: str, *, max_part_mb: int = MAX_PART_SIZE_MB) -> List[s
                     "-reset_timestamps", "1",
                     "-segment_format_options", "movflags=+faststart",
                     f"{stem}_part%03d.mp4",
-                ],
-                check=True,
+                ]
             )
-        except subprocess.CalledProcessError as e:
-            print(f"ERROR: failed to split {vid_name}: {e}")
+        except subprocess.CalledProcessError:
+            upload_log.error("Failed to split %s, keeping it whole", vid_name)
             return [vid_name]
         parts = sorted(glob.glob(part_glob))
-        largest_mb = max(get_file_size_in_mb(part) for part in parts)
+        part_sizes = [round(get_file_size_in_mb(part), 1) for part in parts]
+        upload_log.info(
+            "Split %s every %.0fs into %s parts, MiB: %s",
+            vid_name, segment_seconds, len(parts), part_sizes,
+        )
+        largest_mb = max(part_sizes)
         if largest_mb <= max_part_mb:
             return parts
         segment_seconds *= max_part_mb / largest_mb * SPLIT_HEADROOM
-    print(f"ERROR: {vid_name} still has parts over {max_part_mb}MB after splitting!")
+    upload_log.error("%s still has parts over %sMB after splitting", vid_name, max_part_mb)
     return parts
 
 
@@ -238,12 +292,20 @@ def prepare_for_upload(vid_name: str) -> List[str]:
     size_mb = get_file_size_in_mb(vid_name)
     if size_mb <= TELEGRAM_UPLOAD_LIMIT_MB:
         return [vid_name]
+    upload_log.info("Over the limit: %s, %s", _describe_video(vid_name), _ffmpeg_version())
     total_kbps = calculate_target_bitrate(vid_name, TELEGRAM_UPLOAD_LIMIT_MB)
     if not total_kbps:
+        upload_log.error("Couldn't read the duration of %s, sending it as is", vid_name)
         return [vid_name]
     video_kbps, _ = _split_bitrate_budget(total_kbps)
+    upload_log.info("Video budget at the limit: %skbps", video_kbps)
     if video_kbps >= MIN_SHRINK_VIDEO_KBPS:
-        return [reduce_video_size(vid_name)]
+        shrunk = reduce_video_size(vid_name)
+        if get_file_size_in_mb(shrunk) <= TELEGRAM_UPLOAD_LIMIT_MB:
+            return [shrunk]
+        # The shrink failed or overshot, so split what we have rather than get rejected.
+        upload_log.warning("%s is still over the limit after shrinking, splitting it", shrunk)
+        return split_video(shrunk)
     # Splitting aims below the part limit, so that's what MAX_PARTS parts can really hold.
     max_split_size_mb = int(MAX_PARTS * MAX_PART_SIZE_MB * SPLIT_HEADROOM)
     if size_mb > max_split_size_mb:

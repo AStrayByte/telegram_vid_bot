@@ -2,6 +2,7 @@
 storage_states/*.json
 storage_states/*
 videos/*.mp4
+videos/*.log*
 videos/redvid_temp
 secret.py
 *.DS_Store
